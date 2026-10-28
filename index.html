@@ -1,0 +1,257 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Field-Sales Territory & Canvassing Tool</title>
+    <!-- Leaflet CSS -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <style>
+        body, html { margin: 0; padding: 0; height: 100%; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+        #map { width: 100%; height: 100vh; z-index: 1; }
+        #control-panel {
+            position: absolute; top: 15px; right: 15px; z-index: 1000;
+            background: white; padding: 16px; border-radius: 10px;
+            box-shadow: 0 4px 14px rgba(0,0,0,0.18); width: 290px;
+        }
+        .input-group { margin-bottom: 10px; }
+        .input-group label { display: block; font-weight: 600; font-size: 12px; color: #334155; margin-bottom: 4px; }
+        .input-group select, .input-group input { width: 100%; padding: 8px; border: 1px solid #cbd5e1; border-radius: 6px; box-sizing: border-box; font-size: 13px; }
+        .btn { background: #2563eb; color: white; border: none; padding: 10px; border-radius: 6px; width: 100%; font-weight: bold; cursor: pointer; font-size: 13px; }
+        .btn-success { background: #16a34a; margin-top: 8px; }
+        .btn:hover { opacity: 0.92; }
+        
+        #loading-container { display: none; text-align: center; margin-top: 10px; }
+        .spinner {
+            width: 20px; height: 20px; border: 3px solid #e2e8f0; border-top: 3px solid #2563eb;
+            border-radius: 50%; animation: spin 0.8s linear infinite; display: inline-block; vertical-align: middle; margin-right: 6px;
+        }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+        #loading-text { font-size: 12px; color: #d97706; font-weight: 600; vertical-align: middle; }
+
+        #toast {
+            position: fixed; bottom: 30px; left: 50%; transform: translateX(-50%);
+            background: #dc2626; color: white; padding: 10px 20px; border-radius: 8px;
+            font-size: 13px; font-weight: 600; box-shadow: 0 4px 12px rgba(0,0,0,0.2);
+            z-index: 2000; display: none; transition: opacity 0.3s ease;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="control-panel">
+        <h3 style="margin-top:0; color:#0f172a; font-size: 16px; margin-bottom: 12px;">🏡 Canvassing Turf Tool</h3>
+        
+        <div class="input-group">
+            <label for="zipInput">Target ZIP Code (5 digits):</label>
+            <input type="text" id="zipInput" maxlength="5" placeholder="e.g. 55428" />
+        </div>
+
+        <div class="input-group">
+            <label for="tradeSelect">Trade Focus:</label>
+            <select id="tradeSelect" onchange="renderTurfData()">
+                <option value="all">All Properties in Loaded Turf</option>
+                <option value="windows">Windows (Built 1950–1985)</option>
+                <option value="roofs">Roofs (Built 1990–2005)</option>
+            </select>
+        </div>
+
+        <button class="btn" id="fetchBtn">Get Properties</button>
+        
+        <div id="loading-container">
+            <div class="spinner"></div><span id="loading-text">Rendering Parcels...</span>
+        </div>
+
+        <hr style="margin: 12px 0; border: none; border-top: 1px solid #e2e8f0;">
+        <div id="stats" style="font-size: 12px; color: #475569; line-height: 1.5;">
+            <b>Loaded Target Homes:</b> 0<br>
+        </div>
+        <button class="btn btn-success" onclick="exportCSV()">📥 Export Field Report (CSV)</button>
+    </div>
+
+    <div id="map"></div>
+    <div id="toast"></div>
+
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script src="./turf_data.js"></script>
+    
+    <script>
+        const map = L.map('map').setView([44.9200, -93.3000], 11);
+
+        L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}', {
+            maxZoom: 19,
+            attribution: 'Tiles &copy; Esri'
+        }).addTo(map);
+
+        let markerLayer = L.layerGroup().addTo(map);
+        let loadedParcelsData = {};
+
+        document.getElementById('zipInput').addEventListener('keypress', function (e) {
+            if (e.key === 'Enter') {
+                document.getElementById('fetchBtn').click();
+            }
+        });
+
+        document.getElementById('fetchBtn').addEventListener('click', handleGetProperties);
+
+        function showToast(message) {
+            const toast = document.getElementById('toast');
+            toast.innerText = message;
+            toast.style.display = 'block';
+            setTimeout(() => { toast.style.display = 'none'; }, 4000);
+        }
+
+        function handleGetProperties() {
+            const zipInput = document.getElementById('zipInput').value.trim();
+            const zipRegex = /^\d{5}$/;
+            if (!zipRegex.test(zipInput)) {
+                showToast("⚠️ Invalid ZIP: Please enter a valid 5-digit numeric ZIP code.");
+                return;
+            }
+
+            if (typeof window.TURF_DATA === 'undefined') {
+                showToast("⚠️ turf_data.js not found. Run python3 fetch_turf.py first.");
+                return;
+            }
+
+            if (window.CURRENT_ZIP && window.CURRENT_ZIP !== zipInput) {
+                showToast(`⚠️ Loaded dataset is for ZIP ${window.CURRENT_ZIP}. Run python3 fetch_turf.py for ZIP ${zipInput}.`);
+            }
+
+            renderTurfData();
+        }
+
+        function renderTurfData() {
+            const trade = document.getElementById('tradeSelect').value;
+            const loadingContainer = document.getElementById('loading-container');
+            
+            loadingContainer.style.display = "block";
+            markerLayer.clearLayers();
+            loadedParcelsData = {};
+
+            let features = (window.TURF_DATA && window.TURF_DATA.features) ? window.TURF_DATA.features : [];
+            let loadedCount = 0;
+            let bounds = [];
+
+            for (let feat of features) {
+                let attrs = feat.attributes || {};
+                let geom = feat.geometry || {};
+
+                let lat = geom.y;
+                let lng = geom.x;
+                if (!lat || !lng) continue;
+
+                let yr = attrs.YEAR_BUILT || attrs.YEARBUILT || attrs.YR_BUILT || attrs.BLDG_YEAR || attrs.CONST_YEAR || 1980;
+                
+                if (trade === 'windows' && (yr < 1950 || yr > 1985)) continue;
+                if (trade === 'roofs' && (yr < 1990 || yr > 2005)) continue;
+
+                let address = attrs.SITUS_ADDRESS || attrs.SITE_ADDRESS || attrs.ADDRESS || attrs.ST_NAME || "Address Available in GIS";
+                let owner = attrs.OWNER_NAME || attrs.OWNER || "Public Record";
+                let pid = attrs.PID || attrs.PIN || attrs.OBJECTID || "N/A";
+                let safePid = String(pid).replace(/[^a-zA-Z0-9_]/g, '_');
+
+                loadedParcelsData[safePid] = { pid, address, owner, yearBuilt: yr };
+
+                let saved = localStorage.getItem('prop_' + safePid);
+                let currentStatus = "Unworked";
+                let currentNotes = "";
+                if (saved) {
+                    let parsed = JSON.parse(saved);
+                    currentStatus = parsed.status || "Unworked";
+                    currentNotes = parsed.notes || "";
+                }
+
+                let popupHtml = `
+                    <div style="font-family: sans-serif; font-size: 12px; width: 240px; line-height: 1.4;">
+                        <b style="color: #1d4ed8; font-size: 13px;">PARCEL RECORD</b><br>
+                        <b>Address:</b> ${address}<br>
+                        <b>Owner:</b> ${owner}<br>
+                        <b>Year Built:</b> ${yr}<br>
+                        <b>Parcel ID:</b> ${pid}<br>
+                        <hr style="margin: 6px 0; border: none; border-top: 1px solid #cbd5e1;">
+                        <label><b>Sales Status:</b></label><br>
+                        <select id="status_${safePid}" style="width:100%; margin-bottom:6px; padding:4px; border:1px solid #cbd5e1; border-radius:4px;">
+                            <option value="Unworked" ${currentStatus==='Unworked'?'selected':''}>-- Unworked --</option>
+                            <option value="Not Home" ${currentStatus==='Not Home'?'selected':''}>Not Home</option>
+                            <option value="Flier Left" ${currentStatus==='Flier Left'?'selected':''}>Flier Left</option>
+                            <option value="Spoke to Owner" ${currentStatus==='Spoke to Owner'?'selected':''}>Spoke to Owner</option>
+                            <option value="Estimate Scheduled" ${currentStatus==='Estimate Scheduled'?'selected':''}>Estimate Scheduled</option>
+                            <option value="Not Interested" ${currentStatus==='Not Interested'?'selected':''}>Not Interested</option>
+                        </select>
+                        <label><b>Field Notes:</b></label><br>
+                        <textarea id="notes_${safePid}" maxlength="250" rows="2" style="width:100%; resize:none; padding:4px; border:1px solid #cbd5e1; border-radius:4px;" placeholder="Add notes...">${currentNotes}</textarea>
+                        <button onclick="saveVisit('${safePid}')" style="background:#2563eb; color:white; border:none; padding:6px; width:100%; margin-top:6px; font-weight:bold; border-radius:4px; cursor:pointer;">Save Visit</button>
+                    </div>
+                `;
+
+                let markerColor = "#2563eb";
+                if (currentStatus === "Not Home") markerColor = "#64748b";
+                if (currentStatus === "Flier Left") markerColor = "#d97706";
+                if (currentStatus === "Spoke to Owner" || currentStatus === "Estimate Scheduled") markerColor = "#16a34a";
+                if (currentStatus === "Not Interested") markerColor = "#dc2626";
+
+                let marker = L.circleMarker([lat, lng], {
+                    radius: 5,
+                    color: markerColor,
+                    fillColor: markerColor,
+                    fillOpacity: 0.8
+                }).bindPopup(popupHtml);
+
+                markerLayer.addLayer(marker);
+                bounds.push([lat, lng]);
+                loadedCount++;
+            }
+
+            if (bounds.length > 0) {
+                map.fitBounds(bounds, { padding: [30, 30] });
+            }
+
+            document.getElementById('stats').innerHTML = `<b>Loaded Target Homes:</b> ${loadedCount.toLocaleString()}`;
+            loadingContainer.style.display = "none";
+        }
+
+        function saveVisit(safePid) {
+            let status = document.getElementById('status_' + safePid).value;
+            let notes = document.getElementById('notes_' + safePid).value;
+            let data = { status, notes, timestamp: new Date().toLocaleString() };
+            localStorage.setItem('prop_' + safePid, JSON.stringify(data));
+            alert('Visit saved locally!');
+        }
+
+        function exportCSV() {
+            let csv = ["Parcel ID,Address,Owner,Year Built,Status,Timestamp,Notes"];
+            for (let safePid in loadedParcelsData) {
+                let prop = loadedParcelsData[safePid];
+                let saved = localStorage.getItem('prop_' + safePid);
+                let status = "Unworked", timestamp = "", notes = "";
+                if (saved) {
+                    let d = JSON.parse(saved);
+                    status = d.status || "Unworked";
+                    timestamp = d.timestamp || "";
+                    notes = (d.notes || "").replace(/,/g, " ").replace(/\n/g, " ");
+                }
+                if (status !== "Unworked" || notes !== "") {
+                    csv.push(`"${prop.pid}","${prop.address}","${prop.owner}",${prop.yearBuilt},"${status}","${timestamp}","${notes}"`);
+                }
+            }
+            if (csv.length === 1) {
+                alert("No field visits recorded yet to export!");
+                return;
+            }
+            let blob = new Blob([csv.join("\n")], { type: 'text/csv;charset=utf-8;' });
+            let link = document.createElement("a");
+            link.href = URL.createObjectURL(blob);
+            link.download = "canvass_field_report.csv";
+            link.click();
+        }
+
+        if (typeof window.TURF_DATA !== 'undefined') {
+            if (window.CURRENT_ZIP) {
+                document.getElementById('zipInput').value = window.CURRENT_ZIP;
+            }
+            renderTurfData();
+        }
+    </script>
+</body>
+</html>
