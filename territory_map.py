@@ -1,5 +1,6 @@
 import json
 import urllib.request
+import urllib.parse
 import folium
 from folium.plugins import HeatMap, MarkerCluster
 
@@ -9,7 +10,7 @@ PERMIT_API_URL = (
     "?where=1%3D1&outFields=*&outSR=4326&f=json&resultRecordCount=1000"
 )
 
-# Base regional endpoints
+# 2. Both Regional Endpoints: Hennepin County + Full 7-County Met Council MetroGIS
 PARCEL_BASE_URLS = [
     "https://gis.hennepin.us/arcgis/rest/services/HennepinData/PROPERTY/MapServer/0/query?outFields=*&outSR=4326&f=json",
     "https://arcgis.metc.state.mn.us/data1/rest/services/parcels/Parcels/FeatureServer/3/query?outFields=*&outSR=4326&f=json"
@@ -53,13 +54,13 @@ def get_address(attrs):
         if key.lower() in ["site_address", "siteaddress", "prop_addr", "parcel_address", "address", "display"]:
             if val and str(val).strip():
                 return str(val).strip()
-    return "Minneapolis / Metro Property"
+    return "Regional Property"
 
-def fetch_parcels_by_chunks():
-    """Bypasses 10k server limits by chunking queries into smaller year ranges."""
+def fetch_all_metro_parcels():
+    """Queries all regional endpoints across year chunks, aggregating and deduplicating records."""
     all_features = []
+    seen_pids = set()
     
-    # Define year chunks (e.g., 5-year blocks) to keep query sizes well under server caps
     year_chunks = [
         (1950, 1954),
         (1955, 1959),
@@ -70,14 +71,15 @@ def fetch_parcels_by_chunks():
         (1980, 1985)
     ]
 
-    for base_url in PARCEL_BASE_URLS:
-        success_for_endpoint = False
+    for i, base_url in enumerate(PARCEL_BASE_URLS):
+        endpoint_name = "Hennepin County" if i == 0 else "Met Council 7-County Regional"
+        print(f"\nQuerying endpoint: {endpoint_name}...")
+        
         for start_yr, end_yr in year_chunks:
             offset = 0
             batch_size = 2000
             sql_where = f"YEAR_BUILT >= {start_yr} AND YEAR_BUILT <= {end_yr}"
             
-            print(f"Querying years {start_yr}–{end_yr}...")
             while True:
                 paged_url = f"{base_url}&where={urllib.parse.quote(sql_where)}&resultOffset={offset}&resultRecordCount={batch_size}"
                 features = fetch_json(paged_url)
@@ -85,29 +87,39 @@ def fetch_parcels_by_chunks():
                 if not features:
                     break
                 
-                all_features.extend(features)
-                success_for_endpoint = True
-                print(f"  -> Got {len(features)} records for {start_yr}-{end_yr} (Total: {len(all_features)})")
+                added_count = 0
+                for feat in features:
+                    attrs = feat.get("attributes", {})
+                    pid = attrs.get("PID") or attrs.get("PIN") or attrs.get("OBJECTID")
+                    
+                    # Deduplicate across overlapping endpoints
+                    if pid and pid in seen_pids:
+                        continue
+                    if pid:
+                        seen_pids.add(pid)
+                        
+                    all_features.append(feat)
+                    added_count += 1
+                
+                print(f"  -> Years {start_yr}–{end_yr}: Fetched {len(features)} (Added {added_count}, Cumulative Total: {len(all_features)})")
                 
                 if len(features) < batch_size:
                     break
                 offset += batch_size
                 
-        if success_for_endpoint and len(all_features) > 0:
-            break # Successfully pulled from this endpoint cluster
-            
     return all_features
 
 def build_territory_map():
     print("1. Fetching active window permit data...")
     permit_features = fetch_json(PERMIT_API_URL)
     
-    print("2. Fetching chunked target-era parcels...")
-    parcel_features = fetch_parcels_by_chunks()
+    print("\n2. Fetching full multi-source metro parcel data...")
+    parcel_features = fetch_all_metro_parcels()
 
+    # Center map on Minneapolis
     m = folium.Map(
         location=[44.9778, -93.2650], 
-        zoom_start=12,
+        zoom_start=11,
         tiles="Esri.WorldStreetMap"
     )
     
@@ -208,7 +220,7 @@ def build_territory_map():
     total_parcels = sum(counts.values())
     print(f"\n--- MAP GENERATED ---")
     print(f"Mapped {mapped_permits} active window permits.")
-    print(f"Mapped {total_parcels} target homes across 3 decade tiers:")
+    print(f"Mapped {total_parcels} target homes across the 7-County Metro:")
     print(f"  - 1950-1959: {counts['50s']}")
     print(f"  - 1960-1969: {counts['60s']}")
     print(f"  - 1970-1985: {counts['70s_85']}")
