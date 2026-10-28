@@ -4,3 +4,5 @@ __pycache__/
 .DS_Store
 window_sales_map.html
 window_sales_map.html
+turf_data.js
+turf_data.json
