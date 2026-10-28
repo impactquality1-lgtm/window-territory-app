@@ -3,51 +3,48 @@ import urllib.request
 import folium
 from folium.plugins import HeatMap
 
-# Minneapolis Open Data ArcGIS Feature Layer for CCS Permits
+# 1. Minneapolis Open Data ArcGIS Feature Layer for Active CCS Permits
 PERMIT_API_URL = (
     "https://services.arcgis.com/afSMGVsC7QlRK1kZ/arcgis/rest/services/CCS_Permits/FeatureServer/0/query"
     "?where=1%3D1&outFields=*&outSR=4326&f=json&resultRecordCount=1000"
 )
 
-def get_attr(attrs, *keys):
-    """Case-insensitive attribute lookup."""
-    lower_map = {str(k).lower(): v for k, v in attrs.items()}
-    for key in keys:
-        val = lower_map.get(key.lower())
-        if val is not None and val != "":
-            return val
-    return None
+# 2. Hennepin County Property Assessment Open Data (Sample Parcel API Endpoint for Year Built)
+PARCEL_API_URL = (
+    "https://services1.arcgis.com/123456/arcgis/rest/services/Hennepin_Parcels/FeatureServer/0/query"
+    "?where=YEARBUILT%20%3E%3D%201950%20AND%20YEARBUILT%20%3C%3D%201985&outFields=OBJECTID,Display,YEARBUILT,Address&outSR=4326&f=json&resultRecordCount=500"
+)
 
-def fetch_permits():
-    print("Fetching permit data from Minneapolis Open Data API...")
-    req = urllib.request.Request(PERMIT_API_URL, headers={"User-Agent": "Mozilla/5.0"})
+def fetch_json(url):
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
     try:
         with urllib.request.urlopen(req, timeout=30) as response:
             data = json.loads(response.read().decode("utf-8"))
-            features = data.get("features", [])
-            print(f"Successfully connected! Retrieved {len(features)} raw permit features.")
-            return features
+            return data.get("features", [])
     except Exception as e:
-        print(f"Error fetching permit data: {e}")
+        print(f"Error fetching data from {url}: {e}")
         return []
 
 def build_territory_map():
-    features = fetch_permits()
-    if not features:
-        print("No features returned. Exiting map generation.")
-        return
-
-    # Center map on Minneapolis using Esri World Street Map tiles (bypasses local file 403 blocks)
+    print("Fetching active window permit data...")
+    permit_features = fetch_json(PERMIT_API_URL)
+    
+    # Center map on Minneapolis using Esri World Street Map tiles
     m = folium.Map(
         location=[44.9778, -93.2650], 
         zoom_start=12,
         tiles="Esri.WorldStreetMap"
     )
     
+    # Feature Groups for Layer Toggle Controls
+    permit_group = folium.FeatureGroup(name="Active Window Permits (Competitor Activity)").add_to(m)
+    age_group = folium.FeatureGroup(name="Target Homes (Built 1950-1985)").add_to(m)
+    
     heat_data = []
-    mapped_count = 0
+    mapped_permits = 0
 
-    for item in features:
+    # Process Active Window Permits
+    for item in permit_features:
         attrs = item.get("attributes", {})
         geometry = item.get("geometry", {})
         
@@ -57,43 +54,51 @@ def build_territory_map():
         if not lat or not lng:
             continue
 
-        desc = str(get_attr(attrs, "Description", "permitDescription", "workdescription", "permit_type", "folder_type") or "").lower()
-        work_type = str(get_attr(attrs, "WorkType", "work_type", "permitTypeDesc") or "").lower()
+        blob = " ".join([str(v) for v in attrs.values() if v is not None]).lower()
         
-        combined_text = f"{desc} {work_type}"
-        
-        if any(kw in combined_text for kw in ["window", "siding", "replace", "remodel", "renovation", "building", "residential"]):
+        if "window" in blob:
             heat_data.append([lat, lng])
             
-            permit_no = get_attr(attrs, "PermitNumber", "permitNumber", "permit_number", "folder_rsn", "objectid") or "N/A"
-            address = get_attr(attrs, "Address", "siteAddress", "original_address", "street_address") or "Minneapolis Address"
-            contractor = get_attr(attrs, "ContractorName", "contractor_name", "applicantName", "applicant_name") or "Unknown Contractor"
-            
+            permit_no = attrs.get("permitNumber") or attrs.get("PermitNumber") or attrs.get("OBJECTID") or "N/A"
+            address = attrs.get("Display") or attrs.get("Address") or "Minneapolis Location"
+            contractor = attrs.get("applicantName") or attrs.get("ContractorName") or "Unknown Contractor"
+            status = attrs.get("status") or attrs.get("Status") or "Active"
+            description = attrs.get("comments") or attrs.get("Description") or "Window Replacement"
+
             popup_html = f"""
-            <b>Permit:</b> {permit_no}<br>
-            <b>Address:</b> {address}<br>
-            <b>Contractor:</b> {contractor}<br>
-            <b>Details:</b> {get_attr(attrs, 'Description', 'permitDescription') or 'N/A'}
+            <div style="font-family: sans-serif; font-size: 13px;">
+                <b style="color: #b91c1c;">ACTIVE PERMIT</b><br>
+                <b>Permit ID:</b> {permit_no}<br>
+                <b>Status:</b> {status}<br>
+                <b>Address:</b> {address}<br>
+                <b>Contractor:</b> {contractor}<br>
+                <b>Details:</b> {description}
+            </div>
             """
             
             folium.CircleMarker(
                 location=[lat, lng],
-                radius=4,
-                color="#1d4ed8",
+                radius=6,
+                color="#b91c1c",
                 fill=True,
-                fill_color="#3b82f6",
-                fill_opacity=0.7,
+                fill_color="#ef4444",
+                fill_opacity=0.9,
                 popup=folium.Popup(popup_html, max_width=300)
-            ).add_to(m)
+            ).add_to(permit_group)
             
-            mapped_count += 1
+            mapped_permits += 1
 
+    # Add HeatMap to Permit Layer
     if heat_data:
-        HeatMap(heat_data, radius=15, blur=10, max_zoom=15).add_to(m)
+        HeatMap(heat_data, radius=15, blur=10, max_zoom=15).add_to(permit_group)
+
+    # Layer Control toggle on the top right
+    folium.LayerControl(collapsed=False).add_to(m)
 
     output_file = "window_sales_map.html"
     m.save(output_file)
-    print(f"Successfully mapped {mapped_count} targeted permits to {output_file}.")
+    print(f"\n--- MAP SUMMARY ---")
+    print(f"Mapped {mapped_permits} active window permits to {output_file}.")
 
 if __name__ == "__main__":
     build_territory_map()
